@@ -26,6 +26,9 @@ app = FastAPI(title="HeatPermit AI Backend")
 #     allow_headers=["*"],
 # )
 
+
+app = FastAPI(title="HeatPermit AI Backend")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -39,7 +42,6 @@ def health_check():
     return {"status": "ok", "service": "HeatPermit AI Backend"}
 
 app.include_router(events.router)
-
 
 
 
