@@ -15,7 +15,7 @@ if missing:
         f"Check your .env file."
     )
 
-app = FastAPI(title="HeatPermit AI Backend")
+app = FastAPI(title="HeatPermit AI Backend API")
 
 # app.add_middleware(
 #     CORSMiddleware,
