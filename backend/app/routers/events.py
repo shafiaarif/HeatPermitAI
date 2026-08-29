@@ -9,6 +9,9 @@ from app.models.db_models import Event, HeatAssessment, SafetyPlan, WhatIfCompar
 from app.services.heat_intelligence_service import generate_heat_intelligence_report
 from fastapi.responses import FileResponse
 from app.utils.time_validation import validate_same_day_window, InvalidTimeWindowError
+import threading
+from app.database import SessionLocal
+from app.services.job_manager import create_job, update_job, get_job
 
 router = APIRouter(prefix="/api/events", tags=["events"])
 
@@ -85,6 +88,52 @@ def what_if(event_id: str, proposed_start_time: str, proposed_end_time: str, db:
 
     return {"event_id": event_id, "event_name": event.name, **result}
 
+def _run_what_if_job(job_id: str, event_id: str, proposed_start_time: str, proposed_end_time: str):
+    """Runs in a background thread — same pattern as the decision pipeline."""
+    db = SessionLocal()
+    try:
+        update_job(job_id, status="processing", progress="Assessing current schedule...")
+        event = db.query(Event).filter(Event.id == event_id).first()
+        if not event:
+            update_job(job_id, status="failed", error="Event not found")
+            return
+
+        update_job(job_id, progress="Assessing proposed schedule...")
+        result = run_what_if_comparison(event, proposed_start_time, proposed_end_time, db)
+
+        update_job(job_id, status="completed", progress="Done",
+                   result={"event_id": event_id, "event_name": event.name, **result})
+    except InvalidTimeWindowError as e:
+        update_job(job_id, status="failed", error=str(e))
+    except Exception as e:
+        update_job(job_id, status="failed", error=f"FortyGuard error: {str(e)}")
+    finally:
+        db.close()
+
+
+@router.post("/{event_id}/what-if/start")
+def start_what_if_job(event_id: str, proposed_start_time: str, proposed_end_time: str, db: Session = Depends(get_db)):
+    """Returns instantly with a job_id — the frontend polls for the result."""
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    job_id = create_job()
+    thread = threading.Thread(
+        target=_run_what_if_job,
+        args=(job_id, event_id, proposed_start_time, proposed_end_time),
+        daemon=True,
+    )
+    thread.start()
+    return {"job_id": job_id, "status": "pending"}
+
+
+@router.get("/what-if/status/{job_id}")
+def get_what_if_job_status(job_id: str):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 @router.post("/{event_id}/decision")
 def get_full_decision_bundle(event_id: str, db: Session = Depends(get_db)):
@@ -264,3 +313,61 @@ def get_intelligence_report(event_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=502, detail=f"Heat Intelligence error: {str(e)}")
 
     return FileResponse(file_path, media_type="application/pdf", filename=os.path.basename(file_path))
+
+def _run_decision_pipeline(job_id: str, event_id: str):
+    """Runs in a background thread — the HTTP request that spawned this
+    is already done and returned, so this can take as long as it needs."""
+    db = SessionLocal()
+    try:
+        update_job(job_id, status="processing", progress="Fetching heat data from FortyGuard...")
+        pipeline = build_pipeline(db)
+        final_state = pipeline.invoke({"event_id": event_id})
+
+        update_job(job_id, progress="Finalizing decision and safety plan...")
+        result = {
+            "event_id": event_id,
+            "event_name": final_state["event"]["name"],
+            "assessment": {
+                "duration_hours": final_state["duration_hours"],
+                **final_state["risk_assessment"],
+                "hourly_timeline": final_state["hourly_timeline"],
+            },
+            "decision": final_state.get("decision"),
+            "what_if_evidence": final_state.get("what_if_result"),
+            "no_safe_alternative": final_state.get("no_safe_alternative"),
+            "role_recommendations": final_state.get("role_recommendations"),
+            "safety_plan": final_state.get("safety_plan"),
+        }
+        update_job(job_id, status="completed", progress="Done", result=result)
+    except ValueError as e:
+        update_job(job_id, status="failed", error=str(e))
+    except Exception as e:
+        update_job(job_id, status="failed", error=f"FortyGuard error: {str(e)}")
+    finally:
+        db.close()
+
+
+@router.post("/{event_id}/decision/start")
+def start_decision_job(event_id: str, db: Session = Depends(get_db)):
+    """
+    Returns instantly with a job_id and runs the full pipeline in a
+    background thread — the frontend polls /decision/status/{job_id}
+    instead of holding one HTTP connection open for 2-4 minutes, which
+    trips proxy timeouts on hosted platforms.
+    """
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    job_id = create_job()
+    thread = threading.Thread(target=_run_decision_pipeline, args=(job_id, event_id), daemon=True)
+    thread.start()
+    return {"job_id": job_id, "status": "pending"}
+
+
+@router.get("/decision/status/{job_id}")
+def get_decision_job_status(job_id: str):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job

@@ -116,6 +116,25 @@ export interface HeatmapTilesResult {
   source: "cache" | "live";
 }
 
+export interface JobStartResult {
+  job_id: string;
+  status: string;
+}
+
+export interface JobStatusResult {
+  status: "pending" | "processing" | "completed" | "failed";
+  progress: string | null;
+  result: DecisionBundle | null;
+  error: string | null;
+}
+
+export interface WhatIfJobStatusResult {
+  status: "pending" | "processing" | "completed" | "failed";
+  progress: string | null;
+  result: WhatIfResult | null;
+  error: string | null;
+}
+
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
@@ -146,6 +165,21 @@ export const api = {
     ),
 
   decision: (id: string) => apiFetch<DecisionBundle>(`/${id}/decision`, { method: "POST" }),
+
+  startDecisionJob: (id: string) =>
+    apiFetch<JobStartResult>(`/${id}/decision/start`, { method: "POST" }),
+
+  getDecisionJobStatus: (jobId: string) =>
+    apiFetch<JobStatusResult>(`/decision/status/${jobId}`),
+
+  startWhatIfJob: (id: string, startTime: string, endTime: string) =>
+    apiFetch<JobStartResult>(
+      `/${id}/what-if/start?proposed_start_time=${startTime}&proposed_end_time=${endTime}`,
+      { method: "POST" }
+    ),
+
+  getWhatIfJobStatus: (jobId: string) =>
+    apiFetch<WhatIfJobStatusResult>(`/what-if/status/${jobId}`),
 
   history: (id: string) => apiFetch<HistoryResult>(`/${id}/history`),
 

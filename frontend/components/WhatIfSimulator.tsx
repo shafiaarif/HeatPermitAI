@@ -10,13 +10,35 @@ export default function WhatIfSimulator({ eventId }: { eventId: string }) {
   const [result, setResult] = useState<WhatIfResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<string>("");
 
   async function runWhatIf() {
     setLoading(true);
     setError(null);
+    setProgress("Starting comparison...");
     try {
-      const res = await api.whatIf(eventId, startTime, endTime);
-      setResult(res);
+      const { job_id } = await api.startWhatIfJob(eventId, startTime, endTime);
+
+      let final = null;
+      const MAX_ATTEMPTS = 100; // ~5 minutes at 3s intervals — safety limit
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const status = await api.getWhatIfJobStatus(job_id);
+        if (status.progress) setProgress(status.progress);
+
+        if (status.status === "completed" && status.result) {
+          final = status.result;
+          break;
+        }
+        if (status.status === "failed") {
+          throw new Error(status.error || "What-If comparison failed");
+        }
+      }
+
+      if (!final) {
+        throw new Error("Comparison timed out — please try again.");
+      }
+      setResult(final);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -50,7 +72,7 @@ export default function WhatIfSimulator({ eventId }: { eventId: string }) {
       </div>
 
       {loading && (
-        <p className="text-xs text-gray-500">This may take 1-3 minutes — fetching live FortyGuard data...</p>
+        <p className="text-xs text-gray-500">{progress || "Fetching live FortyGuard data..."}</p>
       )}
       {error && <p className="text-xs text-red-400">{error}</p>}
 

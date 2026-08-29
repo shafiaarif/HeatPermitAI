@@ -29,6 +29,7 @@ export default function EventDashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
+  const [progress, setProgress] = useState<string>("");
 
   useEffect(() => {
     if (!eventId) return;
@@ -37,14 +38,31 @@ export default function EventDashboardPage() {
     async function load() {
       setLoading(true);
       setError(null);
+      setProgress("Starting assessment...");
       try {
         const ev = await api.getEvent(eventId);
         if (cancelled) return;
         setEvent(ev);
 
-        const dec = await api.decision(eventId);
+        const { job_id } = await api.startDecisionJob(eventId);
         if (cancelled) return;
-        setBundle(dec);
+
+        // Poll every 3 seconds until the job is done or failed
+        while (!cancelled) {
+          await new Promise((r) => setTimeout(r, 3000));
+          const status = await api.getDecisionJobStatus(job_id);
+          if (cancelled) return;
+
+          if (status.progress) setProgress(status.progress);
+
+          if (status.status === "completed" && status.result) {
+            setBundle(status.result);
+            break;
+          }
+          if (status.status === "failed") {
+            throw new Error(status.error || "Assessment failed");
+          }
+        }
       } catch (err: any) {
         if (!cancelled) setError(err.message || "Something went wrong");
       } finally {
@@ -65,7 +83,7 @@ export default function EventDashboardPage() {
           <div className="w-8 h-8 border-2 border-orange-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
           <p className="text-white font-semibold text-sm mb-1">Running full AI heat assessment...</p>
           <p className="text-gray-500 text-xs">
-            Fetching live FortyGuard data and generating LLM decision — this can take 2-4 minutes.
+            {progress || "Fetching live FortyGuard data and generating LLM decision — this can take 2-4 minutes."}
           </p>
         </div>
       </div>
